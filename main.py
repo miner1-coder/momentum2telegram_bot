@@ -1,145 +1,63 @@
-
 import os
-import requests, re, time
-from datetime import datetime
-from replit import db
-from threading import Thread
+import requests
+import socket
+print(socket.gethostbyname("api.lunarcrush.com"))
 
 # === CONFIG ===
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-TWITTER_API_KEY = os.environ["TWITTER_API_KEY"]
-TWITTER_SEARCH_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
-HEADERS = {"x-api-key": TWITTER_API_KEY}
-SLEEP_INTERVAL_MINUTES = 15
+LUNARCRUSH_API_KEY = os.environ.get("LUNARCRUSH_API_KEY")  # Optional
 
-# === ALERTING ===
+
+
+# === TELEGRAM ALERT ===
 def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        print(f"📨 Telegram response: {r.status_code} - {r.text}")
     except Exception as e:
         print(f"❌ Telegram error: {e}")
 
-# === TEXT PARSING ===
-def extract_cashtags(tweet_text):
-    return re.findall(r"\$[A-Z]{2,10}", tweet_text.upper())
+# === LUNARCRUSH FETCH ===
+def fetch_top_altrank(limit=5):
+    url = "https://api.lunarcrush.com/v4"
+    params = {
+        "data": "assets",
+        "key": os.environ["LUNARCRUSH_API_KEY"],
+        "sort": "alt_rank",
+        "limit": limit
+    }
 
-# === TWEET FETCHING ===
-def get_trending_tweets(max_pages=5):
-    all_tweets = []
-    cursor = None
+    try:
+        r = requests.get(url, params=params)
+        print("🔍 Raw response text:", r.text[:200])  # For debugging
+        r.raise_for_status()
+        return r.json().get("data", [])
+    except Exception as e:
+        print(f"❌ Failed to fetch AltRank data: {e}")
+        return []
 
-    for page in range(max_pages):
-        params = {"query": "$BTC"}
-        if cursor:
-            params["cursor"] = cursor
 
-        print(f"🔄 Fetching page {page + 1}...")
-        try:
-            r = requests.get(TWITTER_SEARCH_URL, headers=HEADERS, params=params)
-            data = r.json()
-        except Exception as e:
-            print(f"❌ Failed to parse JSON: {e}")
-            break
 
-        tweets = data.get("data") or data.get("statuses") or data.get("tweets") or []
-        print(f"📥 Page returned {len(tweets)} tweets")
-        all_tweets.extend(tweets)
-
-        cursor = data.get("cursor")
-        if not cursor:
-            break
-        time.sleep(1)  # prevent rate limit
-
-    # Store latest tweets in db
-    processed_tweets = []
-    coin_data = {}
-
-    for tweet in all_tweets:
-        text = tweet.get("text") or tweet.get("full_text") or ""
-        likes = tweet.get("favorite_count", 0)
-        retweets = tweet.get("retweet_count", 0)
-        engagement = likes + retweets
-        created_at = tweet.get("createdAt", "")
-
-        processed_tweets.append({
-            "text": text,
-            "engagement": engagement,
-            "created_at": created_at
-        })
-
-        cashtags = extract_cashtags(text)
-        for tag in cashtags:
-            coin = tag[1:]  # remove $
-            if coin not in coin_data:
-                coin_data[coin] = {"mentions": 0, "engagement": 0}
-            coin_data[coin]["mentions"] += 1
-            coin_data[coin]["engagement"] += engagement
-
-    db['latest_tweets'] = processed_tweets[:100]  # Keep last 100 tweets
-    db['tracked_coins'] = coin_data
-
-    return coin_data
-
-# === MOMENTUM DETECTION ===
-def compare_with_previous(current_data):
-    alerts = []
-    for coin, data in current_data.items():
-        previous = db.get(coin, {"mentions": 0, "engagement": 0})
-        prev_mentions = previous["mentions"]
-        prev_engagement = previous["engagement"]
-
-        growth_mentions = ((data["mentions"] - prev_mentions) / prev_mentions * 100) if prev_mentions else 0
-        growth_engagement = ((data["engagement"] - prev_engagement) / prev_engagement * 100) if prev_engagement else 0
-
-        db[coin] = data  # store current for next run
-
-        if growth_mentions > 100 and growth_engagement > 200:
-            alert = f"🚨 ${coin} is surging!\nMentions ↑ {growth_mentions:.1f}%\nEngagement ↑ {growth_engagement:.1f}%"
-            alerts.append(alert)
-
-    return alerts
-
-def send_top_3_summary(current_data):
-    if not current_data:
+# === FORMAT ALERT ===
+def alert_top_altrank_coins():
+    coins = fetch_top_altrank(limit=5)
+    if not coins:
+        send_telegram_alert("⚠️ No AltRank data found.")
         return
 
-    sorted_coins = sorted(
-        current_data.items(),
-        key=lambda item: (item[1]["mentions"], item[1]["engagement"]),
-        reverse=True
-    )
+    msg = ["🏆 Top Coins by AltRank:\n"]
+    for c in coins:
+        msg.append(
+            f"${c['symbol']} — AltRank: {c['alt_rank']} | "
+            f"GalaxyScore: {c.get('galaxy_score', 'N/A')} | "
+            f"Price: ${c.get('price', 'N/A'):.4f}"
+        )
+    send_telegram_alert("\n".join(msg))
 
-    top_coins = sorted_coins[:3]
-    lines = ["🏆 Top Coins This Run:"]
-    for i, (coin, data) in enumerate(top_coins, start=1):
-        lines.append(f"{i}. ${coin} — {data['mentions']} mentions, {data['engagement']} engagement")
-
-    message = "\n".join(lines)
-    send_telegram_alert(message)
-
-# === MAIN RUNNER ===
-def main():
-    while True:
-        print(f"\n⏱️ Run at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        try:
-            trending = get_trending_tweets()
-            print(f"✅ Parsed {len(trending)} coins")
-            alerts = compare_with_previous(trending)
-            for alert in alerts:
-                send_telegram_alert(alert)
-                print(alert)
-
-            send_top_3_summary(trending)
-            print("✅ Cycle complete")
-
-        except Exception as e:
-            print(f"⚠️ ERROR: {e}")
-            send_telegram_alert(f"⚠️ Momentum bot error: {e}")
-        print(f"💤 Sleeping {SLEEP_INTERVAL_MINUTES} min...\n" + "-" * 40)
-        time.sleep(SLEEP_INTERVAL_MINUTES * 60)
-
+# === MAIN ===
 if __name__ == "__main__":
-    main()
+    send_telegram_alert("🟢 Fetching top AltRank coins from LunarCrush...")
+    alert_top_altrank_coins()
