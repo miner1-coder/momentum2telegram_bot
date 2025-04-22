@@ -1,11 +1,9 @@
+
 import os
 import requests, re, time
 from datetime import datetime
 from replit import db
-from flask import Flask, render_template
 from threading import Thread
-
-app = Flask(__name__)
 
 # === CONFIG ===
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -14,13 +12,6 @@ TWITTER_API_KEY = os.environ["TWITTER_API_KEY"]
 TWITTER_SEARCH_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 HEADERS = {"x-api-key": TWITTER_API_KEY}
 SLEEP_INTERVAL_MINUTES = 15
-
-# === WEB ROUTES ===
-@app.route('/')
-def dashboard():
-    tweets = db.get('latest_tweets', [])
-    coins = db.get('tracked_coins', {})
-    return render_template('dashboard.html', tweets=tweets, coins=coins)
 
 # === ALERTING ===
 def send_telegram_alert(message):
@@ -129,9 +120,8 @@ def send_top_3_summary(current_data):
     message = "\n".join(lines)
     send_telegram_alert(message)
 
-
 # === MAIN RUNNER ===
-def bot_loop():
+def main():
     while True:
         print(f"\n⏱️ Run at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
         try:
@@ -152,9 +142,4 @@ def bot_loop():
         time.sleep(SLEEP_INTERVAL_MINUTES * 60)
 
 if __name__ == "__main__":
-    # Start bot in background thread
-    bot_thread = Thread(target=bot_loop, daemon=True)
-    bot_thread.start()
-
-    # Start web server
-    app.run(host='0.0.0.0', port=5000)
+    main()
