@@ -2,6 +2,10 @@ import os
 import requests, re, time
 from datetime import datetime
 from replit import db
+from flask import Flask, render_template
+from threading import Thread
+
+app = Flask(__name__)
 
 # === CONFIG ===
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -10,6 +14,13 @@ TWITTER_API_KEY = os.environ["TWITTER_API_KEY"]
 TWITTER_SEARCH_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
 HEADERS = {"x-api-key": TWITTER_API_KEY}
 SLEEP_INTERVAL_MINUTES = 15
+
+# === WEB ROUTES ===
+@app.route('/')
+def dashboard():
+    tweets = db.get('latest_tweets', [])
+    coins = db.get('tracked_coins', {})
+    return render_template('dashboard.html', tweets=tweets, coins=coins)
 
 # === ALERTING ===
 def send_telegram_alert(message):
@@ -24,7 +35,7 @@ def send_telegram_alert(message):
 def extract_cashtags(tweet_text):
     return re.findall(r"\$[A-Z]{2,10}", tweet_text.upper())
 
-# === PAGINATED TWEET FETCH WITH DEBUG ===
+# === TWEET FETCHING ===
 def get_trending_tweets(max_pages=5):
     all_tweets = []
     cursor = None
@@ -38,8 +49,6 @@ def get_trending_tweets(max_pages=5):
         try:
             r = requests.get(TWITTER_SEARCH_URL, headers=HEADERS, params=params)
             data = r.json()
-            print("📦 RAW RESPONSE:")
-            print(data)
         except Exception as e:
             print(f"❌ Failed to parse JSON: {e}")
             break
@@ -53,18 +62,24 @@ def get_trending_tweets(max_pages=5):
             break
         time.sleep(1)  # prevent rate limit
 
+    # Store latest tweets in db
+    processed_tweets = []
     coin_data = {}
+
     for tweet in all_tweets:
         text = tweet.get("text") or tweet.get("full_text") or ""
         likes = tweet.get("favorite_count", 0)
         retweets = tweet.get("retweet_count", 0)
         engagement = likes + retweets
+        created_at = tweet.get("createdAt", "")
 
-        print(f"📝 Tweet: {text}")
+        processed_tweets.append({
+            "text": text,
+            "engagement": engagement,
+            "created_at": created_at
+        })
+
         cashtags = extract_cashtags(text)
-        if cashtags:
-            print(f"🔖 Found cashtags: {cashtags}")
-
         for tag in cashtags:
             coin = tag[1:]  # remove $
             if coin not in coin_data:
@@ -72,7 +87,9 @@ def get_trending_tweets(max_pages=5):
             coin_data[coin]["mentions"] += 1
             coin_data[coin]["engagement"] += engagement
 
-    print(f"✅ Coins parsed: {list(coin_data.keys())}")
+    db['latest_tweets'] = processed_tweets[:100]  # Keep last 100 tweets
+    db['tracked_coins'] = coin_data
+
     return coin_data
 
 # === MOMENTUM DETECTION ===
@@ -114,28 +131,30 @@ def send_top_3_summary(current_data):
 
 
 # === MAIN RUNNER ===
-def main():
-    print(f"📡 Fetching Twitter activity...")
-    trending = get_trending_tweets()
-    print(f"🔍 Parsed {len(trending)} coins")
-
-    alerts = compare_with_previous(trending)
-    for alert in alerts:
-        send_telegram_alert(alert)
-        print(alert)
-
-    send_top_3_summary(trending)
-
-    print("✅ Cycle complete")
-
-# === LOOP ===
-if __name__ == "__main__":
+def bot_loop():
     while True:
         print(f"\n⏱️ Run at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
         try:
-            main()
+            trending = get_trending_tweets()
+            print(f"✅ Parsed {len(trending)} coins")
+            alerts = compare_with_previous(trending)
+            for alert in alerts:
+                send_telegram_alert(alert)
+                print(alert)
+
+            send_top_3_summary(trending)
+            print("✅ Cycle complete")
+
         except Exception as e:
             print(f"⚠️ ERROR: {e}")
             send_telegram_alert(f"⚠️ Momentum bot error: {e}")
         print(f"💤 Sleeping {SLEEP_INTERVAL_MINUTES} min...\n" + "-" * 40)
         time.sleep(SLEEP_INTERVAL_MINUTES * 60)
+
+if __name__ == "__main__":
+    # Start bot in background thread
+    bot_thread = Thread(target=bot_loop, daemon=True)
+    bot_thread.start()
+
+    # Start web server
+    app.run(host='0.0.0.0', port=5000)
